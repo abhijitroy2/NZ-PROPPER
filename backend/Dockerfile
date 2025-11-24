@@ -28,16 +28,16 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-COPY requirements.txt .
+# Install dependencies (build context is repo root, Dockerfile is in backend/)
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
-# Copy application code
-COPY app/ ./app/
+# Copy application code (build context is repo root, Dockerfile is in backend/)
+COPY backend/app/ ./app/
 
 # Create logs directory
 RUN mkdir -p logs
