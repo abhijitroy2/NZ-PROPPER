@@ -131,8 +131,14 @@ class PropertyScraper:
         try:
             # Convert datetime objects to ISO format strings for JSON serialization
             cache_data = {}
-            for key, (estimate_value, timestamp) in self.cache.items():
-                cache_data[key] = [estimate_value, timestamp.isoformat()]
+            for key, value in self.cache.items():
+                if isinstance(value, tuple) and len(value) == 2:
+                    # Old format: (estimate_value, timestamp)
+                    estimate_value, timestamp = value
+                    cache_data[key] = [estimate_value, timestamp.isoformat()]
+                elif isinstance(value, dict):
+                    # New format: PropertyScrapeResult dict with timestamp
+                    cache_data[key] = value
             
             # Write to temporary file first, then rename (atomic operation)
             temp_file = self._cache_file.with_suffix('.tmp')
@@ -144,6 +150,70 @@ class PropertyScraper:
             logger.debug(f"[SCRAPER] Saved {len(self.cache)} entries to cache file")
         except Exception as e:
             logger.error(f"[SCRAPER] Failed to save cache to file: {e}", exc_info=True)
+    
+    def _get_cached_result(self, property_link: str) -> Optional[PropertyScrapeResult]:
+        """
+        Check cache for property data.
+        Returns PropertyScrapeResult if cache hit and not expired, None otherwise.
+        """
+        if property_link not in self.cache:
+            return None
+        
+        cache_entry = self.cache[property_link]
+        
+        # Handle old cache format: (estimate_value, timestamp)
+        if isinstance(cache_entry, tuple) and len(cache_entry) == 2:
+            estimate_value, cached_time = cache_entry
+            age_hours = (datetime.now() - cached_time).total_seconds() / 3600
+            if age_hours < self.cache_expiration_hours:
+                logger.info(f"[SCRAPER] Cache HIT (old format) for {property_link}: ${estimate_value:,.0f} (age: {age_hours:.1f} hours)")
+                result = PropertyScrapeResult()
+                result.homes_estimate = estimate_value
+                return result
+            else:
+                logger.info(f"[SCRAPER] Cache EXPIRED for {property_link} (age: {age_hours:.1f} hours)")
+                return None
+        
+        # Handle new cache format: dict with PropertyScrapeResult data
+        elif isinstance(cache_entry, dict):
+            timestamp_str = cache_entry.get('timestamp')
+            if timestamp_str:
+                try:
+                    cached_time = datetime.fromisoformat(timestamp_str)
+                    age_hours = (datetime.now() - cached_time).total_seconds() / 3600
+                    if age_hours < self.cache_expiration_hours:
+                        logger.info(f"[SCRAPER] Cache HIT for {property_link} (age: {age_hours:.1f} hours)")
+                        result = PropertyScrapeResult()
+                        result.homes_estimate = cache_entry.get('homes_estimate')
+                        result.homes_estimate_range = cache_entry.get('homes_estimate_range')
+                        result.sold_prices = cache_entry.get('sold_prices', [])
+                        return result
+                    else:
+                        logger.info(f"[SCRAPER] Cache EXPIRED for {property_link} (age: {age_hours:.1f} hours)")
+                        return None
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[SCRAPER] Failed to parse cache timestamp: {e}")
+                    return None
+        
+        return None
+    
+    def _save_result_to_cache(self, property_link: str, result: PropertyScrapeResult):
+        """
+        Save PropertyScrapeResult to cache.
+        """
+        try:
+            cache_entry = {
+                'homes_estimate': result.homes_estimate,
+                'homes_estimate_range': result.homes_estimate_range,
+                'sold_prices': result.sold_prices,
+                'timestamp': datetime.now().isoformat()
+            }
+            self.cache[property_link] = cache_entry
+            self._save_cache()
+            logger.info(f"[SCRAPER] Cached property data for {property_link}")
+            _scraper_file_handler.flush()
+        except Exception as e:
+            logger.error(f"[SCRAPER] Failed to save result to cache: {e}", exc_info=True)
     
     async def _get_browser(self) -> Browser:
         """Get or create browser instance"""
@@ -1024,11 +1094,23 @@ class PropertyScraper:
         Unified method to scrape both HomesEstimate and sold properties in one page load.
         Returns PropertyScrapeResult with both values.
         This is the main method to use - it encapsulates all scraping logic.
+        Checks cache before scraping and saves results to cache after.
         """
         if not property_link:
             return PropertyScrapeResult()
         
         logger.info(f"[SCRAPER] Starting unified scrape for: {property_link}")
+        
+        # Check cache first
+        cached_result = self._get_cached_result(property_link)
+        if cached_result is not None:
+            logger.info(f"[SCRAPER] Using cached data for {property_link}")
+            return cached_result
+        
+        logger.info(f"[SCRAPER] Cache MISS for {property_link}, will scrape")
+        
+        # Enforce rate limiting
+        await self._rate_limit()
         
         # On Windows, use sync API in thread pool
         if sys.platform == 'win32':
@@ -1041,6 +1123,9 @@ class PropertyScraper:
                 result = await loop.run_in_executor(
                     self._executor, self._scrape_property_data_sync, property_link
                 )
+                # Save to cache if we got valid results
+                if result.homes_estimate or result.sold_prices:
+                    self._save_result_to_cache(property_link, result)
                 return result
             except Exception as e:
                 logger.error(f"[SCRAPER] Error in thread pool execution: {e}", exc_info=True)
@@ -1188,6 +1273,10 @@ class PropertyScraper:
             finally:
                 await page.close()
                 await context.close()
+            
+            # Save to cache if we got valid results
+            if result.homes_estimate or result.sold_prices:
+                self._save_result_to_cache(property_link, result)
                 
         except Exception as e:
             logger.error(f"[SCRAPER] Error in unified scrape: {e}", exc_info=True)
