@@ -418,7 +418,32 @@ class PropertyScraper:
                     
                     # Wait for dynamic content to fully load
                     logger.info(f"[SCRAPER SYNC] Waiting for dynamic content to load...")
-                    time.sleep(5)
+                    time.sleep(3)
+                    
+                    # Progressive page-down scrolling to trigger lazy loading
+                    logger.info(f"[SCRAPER SYNC] Starting progressive page-down scrolling to load content...")
+                    page_height = page.evaluate("() => document.body.scrollHeight")
+                    viewport_height = page.evaluate("() => window.innerHeight")
+                    scroll_position = 0
+                    scroll_step = viewport_height * 0.8  # Scroll 80% of viewport at a time
+                    max_scrolls = 20
+                    scroll_count = 0
+                    
+                    while scroll_position < page_height and scroll_count < max_scrolls:
+                        scroll_position += scroll_step
+                        page.evaluate(f"() => window.scrollTo(0, {scroll_position})")
+                        time.sleep(1.5)  # Wait for lazy-loaded content to appear
+                        scroll_count += 1
+                        # Check if page height increased (new content loaded)
+                        new_height = page.evaluate("() => document.body.scrollHeight")
+                        if new_height > page_height:
+                            logger.debug(f"[SCRAPER SYNC] Page height increased: {page_height} -> {new_height}, continuing scroll")
+                            page_height = new_height
+                    
+                    # Scroll to top to ensure all content is accessible
+                    page.evaluate("() => window.scrollTo(0, 0)")
+                    time.sleep(2)
+                    logger.info(f"[SCRAPER SYNC] Completed {scroll_count} progressive scrolls, final page height: {page_height}")
                     
                     # Wait for HomesEstimate widget to appear (if it exists)
                     logger.info(f"[SCRAPER SYNC] Waiting for HomesEstimate widget...")
@@ -441,12 +466,6 @@ class PropertyScraper:
                     
                     if not estimate_widget_found:
                         logger.info(f"[SCRAPER SYNC] HomesEstimate widget not found, will try extraction anyway...")
-                    
-                    # Scroll page to trigger lazy loading
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    time.sleep(3)
-                    page.evaluate("window.scrollTo(0, 0)")
-                    time.sleep(2)
                     
                     # Get page HTML (not just text) for better extraction
                     page_html = page.content()
@@ -524,14 +543,17 @@ class PropertyScraper:
                         
                         if attempt < 4:
                             logger.info(f"[SCRAPER SYNC] Section not found yet, waiting and scrolling (attempt {attempt + 1}/5)...")
-                            # Scroll down progressively to trigger lazy loading
-                            scroll_amount = 500 * (attempt + 1)
-                            page.evaluate(f"window.scrollBy(0, {scroll_amount})")
-                            time.sleep(4)  # Wait longer for content to load
-                            # Also try scrolling to bottom
-                            if attempt == 2:
-                                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                                time.sleep(3)
+                            # Progressive page-down scrolling to trigger lazy loading
+                            viewport_height = page.evaluate("() => window.innerHeight")
+                            current_scroll = page.evaluate("() => window.pageYOffset")
+                            scroll_amount = viewport_height * 0.8  # Scroll 80% of viewport
+                            new_position = current_scroll + scroll_amount
+                            page.evaluate(f"() => window.scrollTo(0, {new_position})")
+                            time.sleep(2.5)  # Wait for lazy-loaded content
+                            # Also try scrolling to bottom on later attempts
+                            if attempt >= 2:
+                                page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                                time.sleep(2)
                     
                     if not sold_section_found:
                         logger.warning(f"[SCRAPER SYNC] 'Nearby Sold Properties' section not found after multiple attempts")
@@ -549,7 +571,7 @@ class PropertyScraper:
                     
                     # Scroll to the section explicitly
                     logger.info(f"[SCRAPER SYNC] Scrolling to 'Nearby Sold Properties' section...")
-                    page.evaluate("""
+                    page.evaluate("""(() => {
                         const elements = Array.from(document.querySelectorAll('*'));
                         const soldSection = elements.find(el => 
                             el.textContent && (
@@ -560,8 +582,8 @@ class PropertyScraper:
                         if (soldSection) {
                             soldSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         }
-                    """)
-                    time.sleep(3)
+                    })()""")
+                    time.sleep(4)  # Increased wait time for section to fully load
                     
                     # Wait for sold property cards to appear
                     logger.info(f"[SCRAPER SYNC] Waiting for sold property cards to load...")
@@ -597,7 +619,8 @@ class PropertyScraper:
                         sold_section_html = ""
                         try:
                             # Try to get HTML from sold properties section only
-                            sold_section_html = page.evaluate("""
+                            # Wrap in IIFE to fix "Illegal return statement" error
+                            sold_section_html = page.evaluate("""(() => {
                                 const elements = Array.from(document.querySelectorAll('*'));
                                 const soldSection = elements.find(el => 
                                     el.textContent && (
@@ -612,7 +635,7 @@ class PropertyScraper:
                                     return container ? container.innerHTML : '';
                                 }
                                 return '';
-                            """)
+                            })()""")
                         except Exception as e:
                             logger.debug(f"[SCRAPER SYNC] Error getting sold section HTML: {e}")
                         
@@ -696,7 +719,20 @@ class PropertyScraper:
                         try:
                             logger.info(f"[SCRAPER SYNC] Clicking next button (click {click_count + 1})...")
                             next_button.click()
-                            time.sleep(5)  # Wait longer for new cards to load
+                            time.sleep(3)  # Initial wait for new content to start loading
+                            
+                            # Progressive scroll after click to trigger lazy loading of new cards
+                            viewport_height = page.evaluate("() => window.innerHeight")
+                            current_scroll = page.evaluate("() => window.pageYOffset")
+                            scroll_position = current_scroll
+                            scroll_step = viewport_height * 0.7
+                            for _ in range(3):  # Do 3 progressive scrolls
+                                scroll_position += scroll_step
+                                page.evaluate(f"() => window.scrollTo(0, {scroll_position})")
+                                time.sleep(1.2)  # Wait for lazy-loaded content
+                            
+                            time.sleep(2)  # Final wait for all content to settle
+                            
                             # Wait for new cards to appear
                             try:
                                 page.wait_for_selector('[class*="sold"][class*="card"], [class*="property"][class*="card"]', 
