@@ -420,9 +420,31 @@ class PropertyScraper:
                     logger.info(f"[SCRAPER SYNC] Waiting for dynamic content to load...")
                     time.sleep(5)
                     
+                    # Wait for HomesEstimate widget to appear (if it exists)
+                    logger.info(f"[SCRAPER SYNC] Waiting for HomesEstimate widget...")
+                    estimate_selectors = [
+                        '[class*="estimate"]',
+                        '[class*="HomesEstimate"]',
+                        '[data-testid*="estimate"]',
+                        'text=HomesEstimate',
+                    ]
+                    estimate_widget_found = False
+                    for selector in estimate_selectors:
+                        try:
+                            page.wait_for_selector(selector, timeout=10000, state='visible')
+                            estimate_widget_found = True
+                            logger.info(f"[SCRAPER SYNC] Found HomesEstimate widget using: {selector}")
+                            time.sleep(2)  # Wait for widget to fully render
+                            break
+                        except Exception:
+                            continue
+                    
+                    if not estimate_widget_found:
+                        logger.info(f"[SCRAPER SYNC] HomesEstimate widget not found, will try extraction anyway...")
+                    
                     # Scroll page to trigger lazy loading
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    time.sleep(2)
+                    time.sleep(3)
                     page.evaluate("window.scrollTo(0, 0)")
                     time.sleep(2)
                     
@@ -539,7 +561,30 @@ class PropertyScraper:
                             soldSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         }
                     """)
-                    time.sleep(4)  # Wait longer for section to fully render
+                    time.sleep(3)
+                    
+                    # Wait for sold property cards to appear
+                    logger.info(f"[SCRAPER SYNC] Waiting for sold property cards to load...")
+                    card_selectors = [
+                        '[class*="sold"][class*="card"]',
+                        '[class*="property"][class*="card"]',
+                        '[data-testid*="sold"]',
+                        '[class*="sold-property"]',
+                    ]
+                    cards_found = False
+                    for selector in card_selectors:
+                        try:
+                            page.wait_for_selector(selector, timeout=10000, state='visible')
+                            cards_found = True
+                            logger.info(f"[SCRAPER SYNC] Found sold property cards using: {selector}")
+                            time.sleep(3)  # Wait for cards to fully render
+                            break
+                        except Exception:
+                            continue
+                    
+                    if not cards_found:
+                        logger.warning(f"[SCRAPER SYNC] Sold property cards not found with selectors, continuing anyway...")
+                        time.sleep(5)  # Extra wait if cards not found
                     
                     # Extract sold prices with pagination
                     logger.info(f"[SCRAPER SYNC] Extracting sold properties...")
@@ -547,26 +592,47 @@ class PropertyScraper:
                     click_count = 0
                     
                     while click_count < max_clicks:
-                        # Extract sold prices from current view
-                        page_html_current = page.content()
+                        # Extract sold prices ONLY from sold property cards section
+                        # First, try to find the sold properties container
+                        sold_section_html = ""
+                        try:
+                            # Try to get HTML from sold properties section only
+                            sold_section_html = page.evaluate("""
+                                const elements = Array.from(document.querySelectorAll('*'));
+                                const soldSection = elements.find(el => 
+                                    el.textContent && (
+                                        el.textContent.includes('Nearby Sold Properties') || 
+                                        el.textContent.includes('nearby sold')
+                                    )
+                                );
+                                if (soldSection) {
+                                    // Get parent container that likely holds all sold property cards
+                                    let container = soldSection.closest('[class*="container"], [class*="section"], [class*="grid"], [class*="list"]');
+                                    if (!container) container = soldSection.parentElement;
+                                    return container ? container.innerHTML : '';
+                                }
+                                return '';
+                            """)
+                        except Exception as e:
+                            logger.debug(f"[SCRAPER SYNC] Error getting sold section HTML: {e}")
                         
-                        # Extract all sold prices from page HTML with more patterns
+                        # Fall back to full page HTML if section extraction failed
+                        if not sold_section_html:
+                            sold_section_html = page.content()
+                        
+                        # Extract sold prices with more specific patterns
                         sold_patterns = [
-                            # Patterns matching actual HTML structure
+                            # Most specific: "SOLD: $1,350,000" format
                             r'SOLD[:\s]*\$?\s*([\d,]+)\s*([KMkm]?)',
-                            r'\$\s*([\d,]+)\s*([KMkm]?)\s*(?:SOLD|sold)',
-                            r'(?:Sold|SOLD)[:\s]*\$?\s*([\d,]+)\s*([KMkm]?)',
-                            # Look for price patterns near "sold" text
-                            r'(?:sold|Sold|SOLD)[^<]*\$?\s*([\d,]+)\s*([KMkm]?)',
-                            # Look for price in divs/spans near sold indicators
-                            r'<[^>]*sold[^>]*>[^<]*\$?\s*([\d,]+)\s*([KMkm]?)[^<]*</',
-                            # Generic price patterns that might be sold prices (3+ digits)
-                            r'\$\s*([\d]{3,}[\d,]*)\s*([KMkm]?)',
+                            # "Sold: $722,000" format
+                            r'Sold[:\s]*\$?\s*([\d,]+)\s*([KMkm]?)',
+                            # Price near "sold" text (within 50 chars)
+                            r'(?:sold|Sold|SOLD)[\s\S]{0,50}?\$?\s*([\d]{3,}[\d,]*)\s*([KMkm]?)',
                         ]
                         
                         prices_before = len(result.sold_prices)
                         for pattern in sold_patterns:
-                            matches = re.finditer(pattern, page_html_current, re.IGNORECASE)
+                            matches = re.finditer(pattern, sold_section_html, re.IGNORECASE)
                             for match in matches:
                                 value_str = match.group(1)
                                 suffix = match.group(2) if len(match.groups()) > 1 else ''
@@ -576,7 +642,9 @@ class PropertyScraper:
                                         price *= 1000
                                     elif suffix.upper() == 'M':
                                         price *= 1000000
-                                    if price >= 1000 and price not in result.sold_prices:
+                                    
+                                    # Filter: Only realistic residential property prices ($100k - $10M)
+                                    if 100000 <= price <= 10000000 and price not in result.sold_prices:
                                         result.sold_prices.append(price)
                                         logger.debug(f"[SCRAPER SYNC] Found sold price: ${price:,.0f}")
                                 except (ValueError, IndexError):
