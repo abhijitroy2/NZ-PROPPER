@@ -420,43 +420,80 @@ class PropertyScraper:
                     
                     # Wait for section to appear with multiple strategies
                     sold_section_found = False
-                    for attempt in range(3):
-                        # Try to find section by text content
+                    for attempt in range(5):  # Increased attempts from 3 to 5
+                        # Try to find section by text content (case-insensitive)
                         page_text_current = page.text_content('body') or ''
-                        if 'Nearby Sold Properties' in page_text_current or 'nearby sold' in page_text_current.lower():
-                            sold_section_found = True
-                            logger.info(f"[SCRAPER SYNC] Found 'Nearby Sold Properties' text in page (attempt {attempt + 1})")
+                        page_text_lower = page_text_current.lower()
+                        
+                        # Check for various text patterns
+                        text_patterns = [
+                            'nearby sold properties',
+                            'nearby sold',
+                            'recently sold',
+                            'sold properties',
+                            'comparable sales',
+                        ]
+                        
+                        for pattern in text_patterns:
+                            if pattern in page_text_lower:
+                                sold_section_found = True
+                                logger.info(f"[SCRAPER SYNC] Found '{pattern}' text in page (attempt {attempt + 1})")
+                                break
+                        
+                        if sold_section_found:
                             break
                         
-                        # Try to find section by selector
+                        # Try to find section by selector with more patterns
                         try:
-                            # Look for common selectors that might contain the section
                             selectors_to_try = [
                                 'h2:has-text("Nearby Sold Properties")',
+                                'h2:has-text("Nearby Sold")',
                                 'h3:has-text("Nearby Sold Properties")',
+                                'h3:has-text("Nearby Sold")',
                                 '[class*="sold"]',
                                 '[class*="nearby"]',
+                                '[class*="comparable"]',
                                 'section:has-text("Nearby Sold")',
+                                '[data-testid*="sold"]',
+                                '[aria-label*="sold" i]',
                             ]
                             for selector in selectors_to_try:
-                                element = page.query_selector(selector)
-                                if element:
-                                    logger.info(f"[SCRAPER SYNC] Found section using selector: {selector}")
-                                    sold_section_found = True
-                                    break
+                                try:
+                                    element = page.query_selector(selector)
+                                    if element and element.is_visible():
+                                        logger.info(f"[SCRAPER SYNC] Found section using selector: {selector}")
+                                        sold_section_found = True
+                                        break
+                                except Exception:
+                                    continue
                             if sold_section_found:
                                 break
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"[SCRAPER SYNC] Selector search error: {e}")
                         
-                        if attempt < 2:
-                            logger.info(f"[SCRAPER SYNC] Section not found yet, waiting and scrolling (attempt {attempt + 1}/3)...")
-                            # Scroll down to trigger lazy loading
-                            page.evaluate("window.scrollBy(0, 500)")
-                            time.sleep(3)  # Wait longer for content to load
+                        if attempt < 4:
+                            logger.info(f"[SCRAPER SYNC] Section not found yet, waiting and scrolling (attempt {attempt + 1}/5)...")
+                            # Scroll down progressively to trigger lazy loading
+                            scroll_amount = 500 * (attempt + 1)
+                            page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+                            time.sleep(4)  # Wait longer for content to load
+                            # Also try scrolling to bottom
+                            if attempt == 2:
+                                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                                time.sleep(3)
                     
                     if not sold_section_found:
                         logger.warning(f"[SCRAPER SYNC] 'Nearby Sold Properties' section not found after multiple attempts")
+                        # Log page URL and title for debugging
+                        try:
+                            page_url = page.url
+                            page_title = page.title()
+                            logger.debug(f"[SCRAPER SYNC] Page URL: {page_url}, Title: {page_title}")
+                            # Log a sample of page text
+                            page_text_sample = page.text_content('body')[:500] if page.text_content('body') else "No text"
+                            logger.debug(f"[SCRAPER SYNC] Page text sample: {page_text_sample}")
+                        except Exception:
+                            pass
                         return result
                     
                     # Scroll to the section explicitly
